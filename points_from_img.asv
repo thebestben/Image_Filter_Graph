@@ -1,0 +1,199 @@
+function [axes, points, points_int] = points_from_img(img_name, smoothing) 
+    % load image
+    [img,~] = imread(img_name);
+    img = img(:,:,1);
+    
+    % size of image
+    [img_rows, img_cols] = size(img);
+    
+    % size of coordinate area
+    title = 'Mark X-Axis';
+    message = 'Mark minimum and maximum of the X-Axis';
+    uiwait(msgbox(message, title))
+    x_axis_img = ceil(readPoints(img_name, 2))';
+    
+    title = 'Mark Y-Axis';
+    message = 'Mark minimum and maximum of the Y-Axis';
+    uiwait(msgbox(message, title))
+    y_axis_img = ceil(readPoints(img_name, 2))';
+    
+    % actual axis values
+    axes_input = inputdlg({'x1','x2','y1', 'y2'},...
+        'Enter x and y axis limits',...
+        [1 100; 1 100; 1 100 ; 1 100]);
+    
+    axes_input = cell2mat(cellfun(@str2num,axes_input,'un',0));
+    x_axis = [axes_input(1:2)]';
+    y_axis = [axes_input(3:4)]';
+    
+    % Mark shape of data point
+    message = 'Mark two clicks around the data point shape';
+    title = 'Mark shape';
+    uiwait(msgbox(message, title))
+    
+    box = ceil(readPoints(img_name, 2)); box = box';
+    box_x = sort(box(:,1))';
+    box_y = sort(box(:,2))';
+    
+    % make sure box has odd number of rows and columns for centering 
+    shape_orig = img(box_y(1):box_y(2), box_x(1):box_x(2),:);
+    [shape_rows, shape_cols] = size(shape_orig);
+    
+    if mod(shape_rows, 2) == 0
+        shape_orig = [shape_orig; 255*ones(1, shape_cols)];
+        [shape_rows, shape_cols] = size(shape_orig);
+    end
+    if mod(shape_cols, 2) == 0
+        shape_orig = [shape_orig 255*ones(shape_rows, 1)];
+        [shape_rows, shape_cols] = size(shape_orig);
+    end
+    
+    % add extra entries on outside of array to ensure it can be scanned by the image
+    img = [255*ones(img_rows, shape_cols), img, 255*ones(img_rows, shape_cols)];
+    img = [255*ones(shape_rows, img_cols+(2*shape_cols)); img; 255*ones(shape_rows, img_cols+(2*shape_cols))];
+    
+    % Filter image and map to ones and zeros
+    filter = 200;
+    
+    shape = shape_orig;
+    img_norm = img;
+    
+    img_norm(img_norm<=filter) = 1; img_norm(img_norm>filter) = 0;
+    shape(shape<=filter) = 1; shape(shape>filter) = 0;
+    shape = logical(shape);
+    
+    % get shape center
+    shape_label=logical(shape);
+    props = regionprops(shape_label, shape, 'WeightedCentroid');
+    shape_center = round(props.WeightedCentroid);
+    
+    % scan shape across coordinate area and save matches
+    matches = zeros(img_rows, img_cols);
+    x = 1;
+    y = 1;
+    
+    % vertical loop over coordinate area
+    for j = shape_rows-shape_center(2):shape_rows-shape_center(2)+img_rows-1
+        % horizontal loop over coordinate area
+        for i = shape_cols-shape_center(1):shape_cols-shape_center(1)+img_cols-1
+            % select shape sized section of coordinate area
+            img_section = img_norm(j:j+shape_rows-1, i:i+shape_cols-1);
+            % logical and values together to find possible matches
+            matches(y,x) = sum(img_section & shape, 'all');
+            x = x+1;
+        end
+        x = 1;
+        y = y+1;
+    end
+    
+    % filter matches
+    max_val = max(matches, [], 'all');
+    matches_filter = 0.5;
+    
+    matches_sliced = matches;
+    matches_sliced(matches_sliced<=(matches_filter*max_val)) = 0;
+    
+    % Smooth matches
+    if ~exist('smoothing','var')
+        smoothing = true;
+    end
+    
+    if smoothing
+        % Smooth matches with area with 3x3 matrix
+        w = 3;
+        Nextra  = 0.5*(w-1);
+        matches_p = interp2(1:img_cols,1:img_rows,matches_sliced,-Nextra+1:img_cols+Nextra,(-Nextra+1:img_rows+Nextra).','makima');    % 2D extrapolation must use 'spline' or 'makima' interpolation
+        % Smooth data with sliding window
+        H  = ones(w)./w^2; % The 2D averaging filter
+        matches_smooth  = filter2(H,matches_p,'valid'); % The smooth resulting matrix
+        
+        % Smooth matches with area with 3x3 matrix
+        w = 2;
+        Nextra  = 0.5*(w-1);
+        matches_p = interp2(1:img_cols,1:img_rows,matches_smooth,-Nextra+1:img_cols+Nextra,(-Nextra+1:img_rows+Nextra).','makima');    % 2D extrapolation must use 'spline' or 'makima' interpolation
+        % Smooth data with sliding window
+        H  = ones(w)./w^2; % The 2D averaging filter
+        matches_smooth  = filter2(H,matches_p,'valid'); % The smooth resulting matrix
+    else
+        matches_smooth = matches_sliced;
+    end
+    
+    % find regional maximums in image
+    regmax = imregionalmax(matches_smooth');
+    sparse_regmax = sparse(regmax);
+    [x, y, ~] = find(sparse_regmax);
+    points_img = [x, y];
+    
+    points_img_inrange = points_img;
+    points_img_inrange(find( (points_img(:,1) < x_axis_img(1,1)) | (points_img(:,1) > x_axis_img(2,1)) | (points_img(:,2) > y_axis_img(1,2)) | (points_img(:,2) < y_axis_img(2,2)) ), :) = [];
+    
+    % map values to coordinate area and axes scale
+    x = arrayfun(@(temp) interp1(x_axis_img(:,1), x_axis', temp),  x);
+    y = arrayfun(@(temp) interp1(y_axis_img(:,2), y_axis', temp),  y);
+    
+    points_coord_with_nan = [x y];
+    
+    % remove NaN values
+    points_coord = points_coord_with_nan;
+    points_coord(any(isnan(points_coord), 2), :) = [];
+    num_points = size(points_coord, 1);
+    
+    % get integer points and remove duplicates
+    points_coord_round = floor(points_coord);
+    points_coord_round_unique = unique(points_coord_round,'rows');
+    num_unique_round_points = size(points_coord_round_unique, 1);
+    
+    % Outputs
+    axes = [x_axis; y_axis];
+
+    points.numel = num_points;
+    points.coords = points_coord;
+
+    points_int.numel = num_unique_round_points;
+    points_int.coords = points_coord_int_unique;
+
+    function pts = readPoints(image, n)
+        %readPoints   Read manually-defined points from image
+        %   POINTS = READPOINTS(IMAGE) displays the image in the current figure,
+        %   then records the position of each click of button 1 of the mouse in the
+        %   figure, and stops when another button is clicked. The track of points
+        %   is drawn as it goes along. The result is a 2 x NPOINTS matrix; each
+        %   column is [X; Y] for one point.
+        %
+        %   POINTS = READPOINTS(IMAGE, N) reads up to N points only.
+        if nargin < 2
+            n = Inf;
+            pts = zeros(2, 0);
+        else
+            pts = zeros(2, n);
+        end
+        imshow(image);     % display image
+        xold = 0;
+        yold = 0;
+        k = 0;
+        hold on;           % and keep it there while we plot
+        while 1
+            [xi, yi, but] = ginput(1);      % get a point
+            if ~isequal(but, 1)             % stop if not button 1
+                break
+            end
+            k = k + 1;
+            pts(1,k) = xi;
+            pts(2,k) = yi;
+            if xold
+                plot([xold xi], [yold yi], 'go-');  % draw as we go
+            else
+                plot(xi, yi, 'go');         % first point on its own
+            end
+            if isequal(k, n)
+                break
+            end
+            xold = xi;
+            yold = yi;
+        end
+        hold off;
+        if k < size(pts,2)
+            pts = pts(:, 1:k);
+        end
+    end
+end
